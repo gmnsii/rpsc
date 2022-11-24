@@ -13,8 +13,8 @@ use walkdir::{DirEntry, WalkDir};
 #[derive(Parser, Debug)]
 #[command(version, max_term_width = 98)]
 struct Args {
-    /// Show items whose type match this argument (- for files, d for directories, l for
-    /// symlinks, p for fifo, s for socket, c for character device, b for block device).
+    /// Show items whose type match this argument ('.' or '-' for files, 'd' for directories, 'l' for
+    /// symlinks, 'p' for fifo, 's' for socket, 'c' for character device, 'b' for block device).
     /// Can be specified multiple times to accept multiple types.
     #[arg(long = "type")]
     etype: Option<Vec<char>>,
@@ -221,7 +221,7 @@ fn type_matching(entry: &DirEntry, etype: &Option<&[char]>) -> Result<bool> {
                     matching
                 }
             }
-            '-' => {
+            '.' | '-' => {
                 if entry.file_type().is_file() {
                     true
                 } else {
@@ -243,7 +243,7 @@ fn type_matching(entry: &DirEntry, etype: &Option<&[char]>) -> Result<bool> {
                 }
             }
             _ => bail!(
-                "'{}': Invalid type argument (must be '-', 'd', 'l', 'b', 'c', 'p' or 's')",
+                "'{}': Invalid type argument (must be '.', '-', 'd', 'l', 'b', 'c', 'p' or 's')",
                 c
             ),
         }
@@ -367,8 +367,7 @@ fn get_permission_string(entry: &DirEntry, entry_metadata: &Metadata) -> String 
         .collect::<String>()
 }
 
-/// Prints the entry file name with different colors depending on it's file type and on
-/// the `no_colors` flag.
+/// Prints the entry file name with different colors depending on it's file type if colors is true.
 ///
 /// # Errors
 ///

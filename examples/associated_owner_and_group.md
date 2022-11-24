@@ -22,7 +22,7 @@ examples
 src
 ```
 
-You can also match the associated group with the --group argument (not supported on MacOS!):
+You can also match the associated group with the --group argument (not supported on macOS!):
 ```shell
 $ rpsc --group root
 Cargo.lock

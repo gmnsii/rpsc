@@ -21,9 +21,9 @@ target
 examples
 src
 ```
-You can also specify the --type argument multiple times to return files of multiple types:
+You can also specify the --type argument multiple times to return files of multiple types ('.' and '-' can both be used for normal files):  
 ```shell
-$ rpsc --type d --type -
+$ rpsc --type d --type .
 Cargo.toml
 LICENSE-APACHE
 target
