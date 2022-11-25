@@ -40,7 +40,7 @@ to see a list of commands and their usage.
 
 As of now, building rpsc from source is the only way to install it:
 ```shell
-git clone https://github.com/gmnsii/rpsc && cd rpsc && cargo build --release && mv ./target/release/rpsc /usr/local/bin/ && cd .. && rm -rf rpsc
+git clone https://github.com/gmnsii/rpsc && cd rpsc && cargo build --release && sudo mv ./target/release/rpsc /usr/local/bin/ && cd .. && rm -rf rpsc
 ```
 
 ## License
