@@ -1,8 +1,13 @@
 [package]
 name = "rpsc"
+description = "rpsc is a *nix command line tool to quickly search for file system items matching given permission criterions."
+authors = ["gmnsii gmnsii@protonmail.com"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/gmnsii/rpsc"
+homepage = "https://github.com/gmnsii/rpsc"
 
 [dependencies]
 ansi_term = "0.12.1"
@@ -12,6 +17,8 @@ clap = { version = "4.0.26", features = ["derive", "wrap_help"] }
 lscolors = "0.13.0"
 nix = { version = "0.25.0", features = ["user"] }
 regex = "1.7.0"
+term_grid = "0.2.0"
+terminal_size = "0.2.2"
 walkdir = "2.3.2"
 
 [profile.release]

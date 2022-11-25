@@ -8,10 +8,11 @@ use std::fs::{read_link, Metadata};
 use std::io::StdoutLock;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::{io::Write, path::Path};
+use terminal_size::{terminal_size, Height, Width};
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Parser, Debug)]
-#[command(version, max_term_width = 98)]
+#[command(version, max_term_width = terminal_size().unwrap_or((Width(80), Height(0))).0.0 as usize)]
 struct Args {
     /// Show items whose type match this argument ('.' or '-' for files, 'd' for directories, 'l' for
     /// symlinks, 'p' for fifo, 's' for socket, 'c' for character device, 'b' for block device).
@@ -199,11 +200,11 @@ impl ItemMetadata {
 /// Returns an error if the given path is invalid.
 /// Returns an error if failed to construct a regex from arguments provided with `-u`, '-g' or
 /// '-p'.
-/// Some called functions can also returns errors, for reasons explained in their doc comment.
+/// Some called functions can also returns errors.
 ///
 ///  # Panics
 ///
-///  Some called function can panic, for reasons explained in their doc comment.
+///  Some called function can panic.
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -258,7 +259,6 @@ fn main() -> Result<()> {
     };
 
     let lscolors = LsColors::from_env().unwrap_or_default();
-
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
     let walker = construct_walker(args.recursive, &args.path);
@@ -267,15 +267,16 @@ fn main() -> Result<()> {
         .into_iter()
         .filter_entry(|entry| args.all || !is_hidden(entry))
     {
-        if entry.is_err() {
-            continue; // When we don't have permissions we just skip the entry.
-        }
-        let entry = entry.unwrap();
-        let metadata = entry.metadata();
-        if metadata.is_err() {
-            continue; // Same as above, we ignore the entry if we don't have permissions.
-        }
-        let metadata = metadata.unwrap();
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue, // We just ignore the entry if we don't have the right permissions.
+        };
+        let metadata = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => continue, // Same as above, we ignore the entry if we don't have the right
+                                // permissions.
+        };
+
         let item = Item::new(entry, metadata);
 
         if args.recursive && item.entry.file_type().is_dir() {
@@ -327,7 +328,7 @@ fn type_matching(item: &Item, etype: &Option<&[char]>) -> Result<bool> {
     }
 
     let mut matching = false;
-    for c in etype.as_ref().unwrap().iter() {
+    for c in etype.unwrap().iter() {
         matching = match c {
             '.' | '-' => {
                 if item.entry.file_type().is_file() {
@@ -440,6 +441,9 @@ fn public_permissions_matching(item: &Item, public_permissions: &Option<&Regex>)
 }
 
 /// Prints the entry file name, with different colors depending on its path if colors is true.
+///
+/// We could have an options to use ls default output, with only file names and nothing else, but
+/// since we are dealing with permissions and ownership I don't think it is pertinent.
 ///
 /// # Errors
 ///
