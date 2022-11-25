@@ -21,8 +21,8 @@ drwxr-xr-x     - dev 22 Nov 15:17 src
 drwxr-xr-x@    - dev 23 Nov 14:37 target
 
 $ rpsc -p r-x
-target
-src
+drwxr-xr-x dev target
+drwxr-xr-x dev src
 ```
 Here the -p r-x argument mean we want files whose public permissions match the `r-x` regex.
 rpsc is not limited to permissions and you can also search files based on their type and on their associated owner and group.

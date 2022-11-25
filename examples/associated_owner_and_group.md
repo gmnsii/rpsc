@@ -16,17 +16,17 @@ drwxr-xr-x@ 10 dev   staff    320 Nov 23 14:37 target
 You can match the associated owner with rpsc and the --owner argument:
 ```shell
 $ rpsc --owner dev
-target
-README.md
-examples
-src
+drwxr-xr-x dev staff target
+.rw-r--r-- dev staff README.md
+drwxr-xr-x dev staff examples
+drwxr-xr-x dev staff src
 ```
 
 You can also match the associated group with the --group argument (not supported on macOS!):
 ```shell
 $ rpsc --group root
-Cargo.lock
-Cargo.toml
-LICENSE-APACHE
-LICENSE-MIT
+.rw-r--r-- root root Cargo.lock
+.rw-r--r-- root root Cargo.toml
+.rw-r--r-- root root LICENSE-APACHE
+.rw-r--r-- root root LICENSE-MIT
 ```

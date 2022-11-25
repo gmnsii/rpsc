@@ -60,12 +60,145 @@ struct Args {
     path: String,
 }
 
+/// Represents a file system item.
+struct Item {
+    entry: DirEntry,
+    extra_metadata: ItemMetadata,
+}
+
+impl Item {
+    fn new(entry: DirEntry, metadata: Metadata) -> Self {
+        let extra_metadata = ItemMetadata::new(&entry, &metadata);
+        Self {
+            entry,
+            extra_metadata,
+        }
+    }
+}
+
+/// Represents the metadata of a file system item.
+struct ItemMetadata {
+    permission_string: String,
+    type_char: char,
+    owner: String,
+    group: String,
+}
+
+impl ItemMetadata {
+    fn new(entry: &DirEntry, metadata: &Metadata) -> Self {
+        Self {
+            permission_string: Self::get_permission_string(&entry, &metadata),
+            type_char: Self::get_type_char(&entry),
+            owner: Self::get_owner(&metadata),
+            group: Self::get_group(&metadata),
+        }
+    }
+
+    /// Takes a reference to an entry and returns the permissions of the entry as a string of
+    /// letters and hyphens.
+    ///
+    /// # Panics
+    ///
+    /// Panics if one of the number of the numeric permissions of the entry is greater than 7, which
+    /// should never happen.
+    fn get_permission_string(entry: &DirEntry, metadata: &Metadata) -> String {
+        let mut permissions_code = format!("{:o}", metadata.permissions().mode());
+
+        // Permissions codes have a leading code to indicate file type that we don't want.
+        if entry.file_type().is_dir()
+            || entry.file_type().is_fifo()
+            || entry.file_type().is_block_device()
+            || entry.file_type().is_char_device()
+        {
+            for _ in 0..2 {
+                permissions_code.remove(0);
+            }
+        } else {
+            for _ in 0..3 {
+                permissions_code.remove(0);
+            }
+        }
+        permissions_code
+            .chars()
+            .map(|c| match c {
+                '7' => "rwx",
+                '6' => "rw-",
+                '5' => "r-x",
+                '4' => "r--",
+                '3' => "-wx",
+                '2' => "-w-",
+                '1' => "--x",
+                '0' => "---",
+                _ => panic!("invalid permission"),
+            })
+            .collect::<String>()
+    }
+
+    /// Gets the type character used when printing the entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry type is not recognized, which should never happen.
+    fn get_type_char(entry: &DirEntry) -> char {
+        if entry.file_type().is_file() {
+            '.'
+        } else if entry.file_type().is_dir() {
+            'd'
+        } else if entry.file_type().is_symlink() {
+            'l'
+        } else if entry.file_type().is_socket() {
+            's'
+        } else if entry.file_type().is_fifo() {
+            'p'
+        } else if entry.file_type().is_block_device() {
+            'b'
+        } else if entry.file_type().is_char_device() {
+            'c'
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// Get the name of the owner of the file.
+    ///
+    /// # Panics
+    ///
+    /// Panics if failing to get the owner of the file, which should never happen as we check
+    /// beforehand that we have the right permissions.
+    fn get_owner(metadata: &Metadata) -> String {
+        User::from_uid(Uid::from(metadata.uid()))
+            .unwrap()
+            .unwrap()
+            .name
+    }
+
+    /// Gets the name of the group associated with the entry. Returns an empty string on macos.
+    ///
+    /// # Panics
+    ///
+    /// Panics if failing to get the associated group, which should never happen as we check
+    /// beforehand that we have the right permissions.
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    fn get_group(metadata: &Metadata) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            return String::new();
+        }
+
+        Group::from_gid(Gid::from(metadata.gid()))
+            .unwrap()
+            .unwrap()
+            .name
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error if the `--group` argument was passed on macos.
-/// Returns an error if the path specified in `args.path` is invalid.
-/// Returns an error if failed to construct a regex from arguments provided in
-/// `args.user_permissions`, `args.group_permissions` or `args.public_permissions`.
+/// Returns an error if the given path is invalid.
+/// Returns an error if failed to construct a regex from arguments provided with `-u`, '-g' or
+/// '-p'.
 /// Some called functions can also returns errors, for reasons explained in their doc comment.
 ///
 ///  # Panics
@@ -136,32 +269,33 @@ fn main() -> Result<()> {
             continue; // When we don't have permissions we just skip the entry.
         }
         let entry = entry.unwrap();
-        let entry_metadata = entry.metadata();
-        if entry_metadata.is_err() {
+        let metadata = entry.metadata();
+        if metadata.is_err() {
             continue; // Same as above, we ignore the entry if we don't have permissions.
         }
-        let entry_metadata = entry_metadata.unwrap();
+        let metadata = metadata.unwrap();
+        let item = Item::new(entry, metadata);
 
-        if args.recursive && entry.file_type().is_dir() {
-            writeln!(lock, "\n{}:", entry.path().display())?; // Prints the directory we are currently walking.
+        if args.recursive && item.entry.file_type().is_dir() {
+            writeln!(lock, "\n{}:", item.entry.path().display())?; // Prints the directory we are currently walking.
         }
 
-        let matching = type_matching(&entry, &args.etype.as_deref())?
-            && owner_matching(&entry_metadata, &args.owner.as_deref())
-            && group_matching(&entry_metadata, &args.group.as_deref())
-            && user_permissions_matching(&entry, &entry_metadata, &user_permissions.as_ref())?
-            && group_permissions_matching(&entry, &entry_metadata, &group_permissions.as_ref())?
-            && public_permissions_matching(&entry, &entry_metadata, &public_permissions.as_ref())?;
+        let matching = type_matching(&item, &args.etype.as_deref())?
+            && owner_matching(&item, &args.owner.as_deref())
+            && group_matching(&item, &args.group.as_deref())
+            && user_permissions_matching(&item, &user_permissions.as_ref())?
+            && group_permissions_matching(&item, &group_permissions.as_ref())?
+            && public_permissions_matching(&item, &public_permissions.as_ref())?;
 
         if (!args.invert && matching) || (args.invert && !matching) {
-            print_entry(&mut lock, &entry, colors)?;
+            print_entry(&mut lock, &item, colors)?;
         }
     }
 
     Ok(())
 }
 
-/// Returns a recursive walker with no max depth if `--recursive is set`, else returns a walker
+/// Returns a recursive walker with no max depth if `--recursive` is set, else returns a walker
 /// with a max depth of 1.
 fn construct_walker(recursive: bool, path: &str) -> WalkDir {
     let walker = WalkDir::new(path).min_depth(1);
@@ -180,12 +314,12 @@ fn is_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-/// Determines if the type  of the given entry is matching with one of the given types.
+/// Determines if the typeof the given entry is matching with one of the given types.
 ///
 /// # Errors
 ///
 /// Returns an error if one of the given types is invalid.
-fn type_matching(entry: &DirEntry, etype: &Option<&[char]>) -> Result<bool> {
+fn type_matching(item: &Item, etype: &Option<&[char]>) -> Result<bool> {
     if etype.is_none() {
         return Ok(true);
     }
@@ -193,50 +327,50 @@ fn type_matching(entry: &DirEntry, etype: &Option<&[char]>) -> Result<bool> {
     let mut matching = false;
     for c in etype.as_ref().unwrap().iter() {
         matching = match c {
-            'b' => {
-                if entry.file_type().is_block_device() {
-                    true
-                } else {
-                    matching
-                }
-            }
-            'c' => {
-                if entry.file_type().is_char_device() {
-                    true
-                } else {
-                    matching
-                }
-            }
-            'p' => {
-                if entry.file_type().is_fifo() {
-                    true
-                } else {
-                    matching
-                }
-            }
-            's' => {
-                if entry.file_type().is_socket() {
-                    true
-                } else {
-                    matching
-                }
-            }
             '.' | '-' => {
-                if entry.file_type().is_file() {
+                if item.entry.file_type().is_file() {
                     true
                 } else {
                     matching
                 }
             }
             'd' => {
-                if entry.file_type().is_dir() {
+                if item.entry.file_type().is_dir() {
                     true
                 } else {
                     matching
                 }
             }
             'l' => {
-                if entry.file_type().is_symlink() {
+                if item.entry.file_type().is_symlink() {
+                    true
+                } else {
+                    matching
+                }
+            }
+            'b' => {
+                if item.entry.file_type().is_block_device() {
+                    true
+                } else {
+                    matching
+                }
+            }
+            'c' => {
+                if item.entry.file_type().is_char_device() {
+                    true
+                } else {
+                    matching
+                }
+            }
+            'p' => {
+                if item.entry.file_type().is_fifo() {
+                    true
+                } else {
+                    matching
+                }
+            }
+            's' => {
+                if item.entry.file_type().is_socket() {
                     true
                 } else {
                     matching
@@ -252,46 +386,27 @@ fn type_matching(entry: &DirEntry, etype: &Option<&[char]>) -> Result<bool> {
 }
 
 /// Determines if the owner associated with the given entry is matching with the given owner.
-fn owner_matching(entry_metadata: &Metadata, provided_owner: &Option<&str>) -> bool {
-    if provided_owner.is_none() {
-        return true;
-    }
-
-    let owner = User::from_uid(Uid::from(entry_metadata.uid()))
-        .unwrap()
-        .unwrap();
-    if provided_owner.unwrap() == owner.name {
+fn owner_matching(item: &Item, provided_owner: &Option<&str>) -> bool {
+    if provided_owner.is_none() || provided_owner.unwrap() == item.extra_metadata.owner {
         return true;
     }
     false
 }
 
 /// Determines if the group associated with the given entry is matching with the given group.
-fn group_matching(entry_metadata: &Metadata, provided_group: &Option<&str>) -> bool {
-    if provided_group.is_none() {
-        return true;
-    }
-
-    let group = Group::from_gid(Gid::from(entry_metadata.uid()))
-        .unwrap()
-        .unwrap();
-
-    if provided_group.unwrap() == group.name {
+fn group_matching(item: &Item, provided_group: &Option<&str>) -> bool {
+    if provided_group.is_none() || provided_group.unwrap() == item.extra_metadata.group {
         return true;
     }
     false
 }
 
 /// Matches the given user permissions against the user permissions of the entry.
-fn user_permissions_matching(
-    entry: &DirEntry,
-    entry_metadata: &Metadata,
-    user_permissions: &Option<&Regex>,
-) -> Result<bool> {
+fn user_permissions_matching(item: &Item, user_permissions: &Option<&Regex>) -> Result<bool> {
     if user_permissions.is_none()
         || user_permissions
             .unwrap()
-            .is_match(&get_permission_string(entry, entry_metadata)[0..3])
+            .is_match(&item.extra_metadata.permission_string[0..3])
     {
         return Ok(true);
     }
@@ -299,15 +414,11 @@ fn user_permissions_matching(
 }
 
 /// Matches the given group permissions against the group permissions of the entry.
-fn group_permissions_matching(
-    entry: &DirEntry,
-    entry_metadata: &Metadata,
-    group_permissions: &Option<&Regex>,
-) -> Result<bool> {
+fn group_permissions_matching(item: &Item, group_permissions: &Option<&Regex>) -> Result<bool> {
     if group_permissions.is_none()
         || group_permissions
             .unwrap()
-            .is_match(&get_permission_string(entry, entry_metadata)[3..6])
+            .is_match(&item.extra_metadata.permission_string[3..6])
     {
         return Ok(true);
     }
@@ -315,84 +426,56 @@ fn group_permissions_matching(
 }
 
 /// Matches the given public permissions against the public permissions of the entry.
-fn public_permissions_matching(
-    entry: &DirEntry,
-    entry_metadata: &Metadata,
-    public_permissions: &Option<&Regex>,
-) -> Result<bool> {
+fn public_permissions_matching(item: &Item, public_permissions: &Option<&Regex>) -> Result<bool> {
     if public_permissions.is_none()
         || public_permissions
             .unwrap()
-            .is_match(&get_permission_string(entry, entry_metadata)[6..9])
+            .is_match(&item.extra_metadata.permission_string[6..9])
     {
         return Ok(true);
     }
     Ok(false)
 }
 
-/// Takes a reference to an entry and returns the permissions of the entry as a string of
-/// letters and hyphens.
-///
-/// # Panics
-///
-/// Panics if one of the number of the numeric permissions of the entry is greater than 7, which
-/// should never happen.
-fn get_permission_string(entry: &DirEntry, entry_metadata: &Metadata) -> String {
-    let mut permissions_code = format!("{:o}", entry_metadata.permissions().mode());
-
-    // Permissions codes have a leading 100 for files, a leading 120 for symlinks and a leading 40
-    // for directories. We don't want any of them.
-    if entry.file_type().is_dir() {
-        for _ in 0..2 {
-            permissions_code.remove(0);
-        }
-    } else {
-        for _ in 0..3 {
-            permissions_code.remove(0);
-        }
-    }
-    permissions_code
-        .chars()
-        .map(|c| match c {
-            '7' => "rwx",
-            '6' => "rw-",
-            '5' => "r-x",
-            '4' => "r--",
-            '3' => "-wx",
-            '2' => "-w-",
-            '1' => "--x",
-            '0' => "---",
-            _ => panic!("invalid permission"),
-        })
-        .collect::<String>()
-}
-
-/// Prints the entry file name with different colors depending on it's file type if colors is true.
+/// Prints the entry file name, with different colors depending on its file type if colors is true.
 ///
 /// # Errors
 ///
-/// Returns an error when failing to write line to stdout.
-fn print_entry(lock: &mut StdoutLock, entry: &DirEntry, colors: bool) -> Result<()> {
-    let ename = entry.file_name().to_str().unwrap();
+/// Returns an error when failing to write to stdout.
+fn print_entry(lock: &mut StdoutLock, item: &Item, colors: bool) -> Result<()> {
+    let ename = item.entry.file_name().to_str().unwrap();
+    let displayed_string = format!(
+        "{}{} {} {} {}",
+        item.extra_metadata.type_char,
+        item.extra_metadata.permission_string,
+        item.extra_metadata.owner,
+        item.extra_metadata.group,
+        ename
+    );
 
     if !colors {
-        writeln!(lock, "{}", ename)?;
-    } else if entry.file_type().is_block_device() {
-        writeln!(lock, "{}", Red.paint(ename))?;
-    } else if entry.file_type().is_char_device() {
-        writeln!(lock, "{}", Yellow.paint(ename))?;
-    } else if entry.file_type().is_socket() {
-        writeln!(lock, "{}", Green.paint(ename))?;
-    } else if entry.file_type().is_fifo() {
-        writeln!(lock, "{}", Purple.paint(ename))?;
-    } else if entry.file_type().is_dir() {
-        writeln!(lock, "{}", Blue.paint(ename))?;
-    } else if entry.file_type().is_symlink() {
-        let link = read_link(entry.path()).unwrap();
+        writeln!(lock, "{}", displayed_string)?;
+    } else if item.entry.file_type().is_block_device() {
+        writeln!(lock, "{}", Red.paint(displayed_string))?;
+    } else if item.entry.file_type().is_char_device() {
+        writeln!(lock, "{}", Yellow.paint(displayed_string))?;
+    } else if item.entry.file_type().is_socket() {
+        writeln!(lock, "{}", Green.paint(displayed_string))?;
+    } else if item.entry.file_type().is_fifo() {
+        writeln!(lock, "{}", Purple.paint(displayed_string))?;
+    } else if item.entry.file_type().is_dir() {
+        writeln!(lock, "{}", Blue.paint(displayed_string))?;
+    } else if item.entry.file_type().is_symlink() {
+        let link = read_link(item.entry.path()).unwrap();
         let pointing_to = link.to_str().unwrap();
-        writeln!(lock, "{} -> {}", Cyan.paint(ename), Cyan.paint(pointing_to))?;
+        writeln!(
+            lock,
+            "{} -> {}",
+            Cyan.paint(displayed_string),
+            Cyan.paint(pointing_to)
+        )?;
     } else {
-        writeln!(lock, "{}", White.paint(ename))?;
+        writeln!(lock, "{}", White.paint(displayed_string))?;
     }
 
     Ok(())
