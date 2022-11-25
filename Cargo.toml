@@ -9,6 +9,7 @@ ansi_term = "0.12.1"
 anyhow = "1.0.66"
 atty = "0.2.14"
 clap = { version = "4.0.26", features = ["derive", "wrap_help"] }
+lscolors = "0.13.0"
 nix = { version = "0.25.0", features = ["user"] }
 regex = "1.7.0"
 walkdir = "2.3.2"

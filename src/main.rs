@@ -1,7 +1,7 @@
-use ansi_term::Color::{Blue, Cyan, Green, Purple, Red, White, Yellow};
 use anyhow::{bail, ensure, Result};
 use atty::Stream;
 use clap::Parser;
+use lscolors::{LsColors, Style};
 use nix::unistd::{Gid, Group, Uid, User};
 use regex::Regex;
 use std::fs::{read_link, Metadata};
@@ -257,6 +257,8 @@ fn main() -> Result<()> {
         ),
     };
 
+    let lscolors = LsColors::from_env().unwrap_or_default();
+
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
     let walker = construct_walker(args.recursive, &args.path);
@@ -288,7 +290,7 @@ fn main() -> Result<()> {
             && public_permissions_matching(&item, &public_permissions.as_ref())?;
 
         if (!args.invert && matching) || (args.invert && !matching) {
-            print_entry(&mut lock, &item, colors)?;
+            print_entry(&mut lock, &item, colors, &lscolors)?;
         }
     }
 
@@ -437,12 +439,17 @@ fn public_permissions_matching(item: &Item, public_permissions: &Option<&Regex>)
     Ok(false)
 }
 
-/// Prints the entry file name, with different colors depending on its file type if colors is true.
+/// Prints the entry file name, with different colors depending on its path if colors is true.
 ///
 /// # Errors
 ///
 /// Returns an error when failing to write to stdout.
-fn print_entry(lock: &mut StdoutLock, item: &Item, colors: bool) -> Result<()> {
+fn print_entry(
+    lock: &mut StdoutLock,
+    item: &Item,
+    colors: bool,
+    lscolors: &LsColors,
+) -> Result<()> {
     let ename = item.entry.file_name().to_str().unwrap();
     let displayed_string = format!(
         "{}{} {} {} {}",
@@ -453,29 +460,22 @@ fn print_entry(lock: &mut StdoutLock, item: &Item, colors: bool) -> Result<()> {
         ename
     );
 
+    let style = lscolors.style_for_path(item.entry.path());
+    let ansi_style = style.map(Style::to_ansi_term_style).unwrap_or_default();
+
     if !colors {
         writeln!(lock, "{}", displayed_string)?;
-    } else if item.entry.file_type().is_block_device() {
-        writeln!(lock, "{}", Red.paint(displayed_string))?;
-    } else if item.entry.file_type().is_char_device() {
-        writeln!(lock, "{}", Yellow.paint(displayed_string))?;
-    } else if item.entry.file_type().is_socket() {
-        writeln!(lock, "{}", Green.paint(displayed_string))?;
-    } else if item.entry.file_type().is_fifo() {
-        writeln!(lock, "{}", Purple.paint(displayed_string))?;
-    } else if item.entry.file_type().is_dir() {
-        writeln!(lock, "{}", Blue.paint(displayed_string))?;
     } else if item.entry.file_type().is_symlink() {
         let link = read_link(item.entry.path()).unwrap();
         let pointing_to = link.to_str().unwrap();
         writeln!(
             lock,
             "{} -> {}",
-            Cyan.paint(displayed_string),
-            Cyan.paint(pointing_to)
+            ansi_style.paint(displayed_string),
+            ansi_style.paint(pointing_to)
         )?;
     } else {
-        writeln!(lock, "{}", White.paint(displayed_string))?;
+        writeln!(lock, "{}", ansi_style.paint(displayed_string))?;
     }
 
     Ok(())

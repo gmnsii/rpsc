@@ -4,7 +4,7 @@
 
 rpsc is a \*nix command line tool to quickly search for file systems items matching given permissions criterions.
 
-**Contents:** [Examples](#examples) — [Usage](#usage) — [Installation](#installation) — [License](#license)
+**Contents:** [Examples](#examples) — [Usage](#usage) — [Installation](#installation) — [Styling](#styling) — [License](#license)
 
 </div>
 
@@ -42,6 +42,9 @@ As of now, building rpsc from source is the only way to install it:
 ```shell
 git clone https://github.com/gmnsii/rpsc && cd rpsc && cargo build --release && sudo mv ./target/release/rpsc /usr/local/bin/ && cd .. && rm -rf rpsc
 ```
+
+## Styling
+You can set the colors via the `LS_COLORS` environment variable, like you would for ls or exa. We won't go into too many details here as there is already documentation on how to use this variable available online.
 
 ## License
 
