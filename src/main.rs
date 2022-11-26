@@ -298,6 +298,7 @@ fn main() -> Result<()> {
     } else {
         for entry in WalkDir::new(&config.path)
             .min_depth(1)
+            .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| config.all || !is_hidden(entry))
         {
@@ -353,6 +354,7 @@ where
     for entry in WalkDir::new(path)
         .min_depth(1)
         .max_depth(1)
+        .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| config.all || !is_hidden(entry))
     {
