@@ -5,13 +5,15 @@ use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::fs::{read_link, Metadata};
-use std::io::StdoutLock;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::PathBuf;
-use std::{io::Write, path::Path};
+use std::{
+    fs::{read_link, Metadata},
+    io::{StdoutLock, Write},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
 use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
 use terminal_size::{terminal_size, Height, Width};
+use uucore::{fs::display_permissions_unix, parse_size::parse_size};
 use walkdir::{DirEntry, WalkDir};
 
 static TERM_WIDTH: Lazy<usize> =
@@ -20,7 +22,7 @@ static TERM_WIDTH: Lazy<usize> =
 #[derive(Parser, Debug)]
 #[command(version, max_term_width = *TERM_WIDTH)]
 struct Args {
-    /// Show items whose type match this argument ('.' or '-' for files, 'd' for directories, 'l' for
+    /// Show items whose type match this argument ('-' for files, 'd' for directories, 'l' for
     /// symlinks, 'p' for fifo, 's' for socket, 'c' for character device, 'b' for block device).
     /// Can be specified multiple times to accept multiple types.
     #[arg(long = "type")]
@@ -163,12 +165,12 @@ impl TryFrom<Args> for Config {
 struct Item {
     entry: DirEntry,
     metadata: Metadata,
-    extra_metadata: ItemMetadata,
+    extra_metadata: ExtraMetadata,
 }
 
 impl Item {
     fn new(entry: DirEntry, metadata: Metadata) -> Self {
-        let extra_metadata = ItemMetadata::new(&entry, &metadata);
+        let extra_metadata = ExtraMetadata::new(&entry, &metadata);
         Self {
             entry,
             metadata,
@@ -177,77 +179,21 @@ impl Item {
     }
 }
 
-/// Represents the metadata of a file system item.
-struct ItemMetadata {
+/// Represents some extra metadata not provided by DirEntry.metadata().
+struct ExtraMetadata {
     permission_string: String,
-    type_char: char,
     owner: String,
     group: String,
+    has_xattr: bool,
 }
 
-impl ItemMetadata {
+impl ExtraMetadata {
     fn new(entry: &DirEntry, metadata: &Metadata) -> Self {
         Self {
-            permission_string: Self::get_permission_string(entry, metadata),
-            type_char: Self::get_type_char(entry),
+            permission_string: display_permissions_unix(metadata.permissions().mode() as u16, true),
             owner: Self::get_owner(metadata),
             group: Self::get_group(metadata),
-        }
-    }
-
-    /// Takes a reference to an entry and returns the permissions of the entry as a string of
-    /// letters and hyphens.
-    fn get_permission_string(entry: &DirEntry, metadata: &Metadata) -> String {
-        let mut permissions_code = format!("{:o}", metadata.permissions().mode());
-
-        // Permissions codes have a leading code to indicate file type that we don't want.
-        if entry.file_type().is_dir()
-            || entry.file_type().is_fifo()
-            || entry.file_type().is_block_device()
-            || entry.file_type().is_char_device()
-        {
-            for _ in 0..2 {
-                permissions_code.remove(0);
-            }
-        } else {
-            for _ in 0..3 {
-                permissions_code.remove(0);
-            }
-        }
-        permissions_code
-            .chars()
-            .map(|c| match c {
-                '7' => "rwx",
-                '6' => "rw-",
-                '5' => "r-x",
-                '4' => "r--",
-                '3' => "-wx",
-                '2' => "-w-",
-                '1' => "--x",
-                '0' => "---",
-                _ => unreachable!(),
-            })
-            .collect::<String>()
-    }
-
-    /// Gets the type character used when printing the entry.
-    fn get_type_char(entry: &DirEntry) -> char {
-        if entry.file_type().is_file() {
-            '.'
-        } else if entry.file_type().is_dir() {
-            'd'
-        } else if entry.file_type().is_symlink() {
-            'l'
-        } else if entry.file_type().is_socket() {
-            's'
-        } else if entry.file_type().is_fifo() {
-            'p'
-        } else if entry.file_type().is_block_device() {
-            'b'
-        } else if entry.file_type().is_char_device() {
-            'c'
-        } else {
-            unreachable!()
+            has_xattr: Self::has_extended_attributes(entry),
         }
     }
 
@@ -282,6 +228,14 @@ impl ItemMetadata {
             .unwrap()
             .unwrap()
             .name
+    }
+
+    fn has_extended_attributes(entry: &DirEntry) -> bool {
+        let mut xattr = xattr::list(entry.path()).unwrap().peekable();
+        match xattr.peek() {
+            Some(_) => true,
+            None => false,
+        }
     }
 }
 
@@ -383,8 +337,14 @@ where
             if config.long {
                 grid.add(Cell::from(format!(
                     "{}{}",
-                    item.extra_metadata.type_char, item.extra_metadata.permission_string
+                    item.extra_metadata.permission_string,
+                    if item.extra_metadata.has_xattr {
+                        "@"
+                    } else {
+                        ""
+                    }
                 )));
+                grid.add(Cell::from(item.metadata.nlink().to_string()));
                 grid.add(Cell::from(item.extra_metadata.owner));
                 grid.add(Cell::from(item.extra_metadata.group));
 
@@ -439,7 +399,7 @@ where
                 .unwrap_or_else(|| grid.fit_into_columns(1))
         )?;
     } else {
-        write!(lock, "{}", grid.fit_into_columns(4))?;
+        write!(lock, "{}", grid.fit_into_columns(5))?;
     }
     Ok(())
 }
