@@ -1,24 +1,29 @@
 use anyhow::{bail, ensure, Result};
 use atty::Stream;
 use clap::Parser;
-use lscolors::{LsColors, Style};
+use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
+use once_cell::sync::Lazy;
 use regex::Regex;
-use std::fs::{read_link, Metadata};
+use std::fs::Metadata;
 use std::io::StdoutLock;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::{io::Write, path::Path};
+use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
 use terminal_size::{terminal_size, Height, Width};
 use walkdir::{DirEntry, WalkDir};
 
+static TERM_WIDTH: Lazy<usize> =
+    Lazy::new(|| terminal_size().unwrap_or((Width(80), Height(0))).0 .0 as usize);
+
 #[derive(Parser, Debug)]
-#[command(version, max_term_width = terminal_size().unwrap_or((Width(80), Height(0))).0.0 as usize)]
+#[command(version, max_term_width = *TERM_WIDTH)]
 struct Args {
     /// Show items whose type match this argument ('.' or '-' for files, 'd' for directories, 'l' for
     /// symlinks, 'p' for fifo, 's' for socket, 'c' for character device, 'b' for block device).
     /// Can be specified multiple times to accept multiple types.
     #[arg(long = "type")]
-    etype: Option<Vec<char>>,
+    types: Option<Vec<char>>,
 
     /// Recurse into directories.
     #[arg(short = 'R')]
@@ -33,8 +38,8 @@ struct Args {
     invert: bool,
 
     /// Whether or not rpsc should use colored output (auto, always, never)
-    #[arg(long = "colors", default_value = "auto")]
-    colors: String,
+    #[arg(long = "color", default_value = "auto")]
+    color: String,
 
     /// Specify user permissions using a regex.
     #[arg(short = 'u')]
@@ -61,9 +66,97 @@ struct Args {
     path: String,
 }
 
+/// Represents the configuration of rpsc built using the command line arguments passed by the user.
+struct Config {
+    path: String,
+    color: bool,
+    recursive: bool,
+    all: bool,
+    invert: bool,
+    types: Option<Vec<char>>,
+    user_permissions: Option<Regex>,
+    group_permissions: Option<Regex>,
+    public_permissions: Option<Regex>,
+    owner: Option<String>,
+    group: Option<String>,
+}
+
+impl TryFrom<Args> for Config {
+    type Error = anyhow::Error;
+
+    /// Constructs a configuration from command line arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the --group flag was passed on macos.
+    /// Returns an error if the given path does not exists.
+    /// Returns an error if faling to construct a regex from the -u, -g and -p arguments.
+    /// Returns an error if an invalid argument was passed for the --color option.
+    fn try_from(args: Args) -> Result<Self, Self::Error> {
+        #[cfg(target_os = "macos")]
+        {
+            if args.group.is_some() {
+                bail!("The --group argument is not supported on macos")
+            }
+        }
+        ensure!(
+            Path::new(&args.path).exists(),
+            "\"{}\": No such file or directory (os error 2)",
+            args.path
+        );
+        let user_permissions = match args.user_permissions {
+            Some(s) => match Regex::new(&s) {
+                Ok(re) => Some(re),
+                Err(e) => bail!("\"{s}\": invalid user permissions: {e}"),
+            },
+            None => None,
+        };
+        let group_permissions = match args.group_permissions {
+            Some(s) => match Regex::new(&s) {
+                Ok(re) => Some(re),
+                Err(e) => bail!("\"{s}\" invalid group permissions: {e}"),
+            },
+            None => None,
+        };
+        let public_permissions = match args.public_permissions {
+            Some(s) => match Regex::new(&s) {
+                Ok(re) => Some(re),
+                Err(e) => bail!("\"{s}\": invalid public permissions: {e}"),
+            },
+            None => None,
+        };
+        let color = match args.color.as_str() {
+            "always" => true,
+            "never" => false,
+            "auto" => {
+                // Colors only if stdout is a tty.
+                atty::is(Stream::Stdout)
+            }
+            _ => bail!(
+                "\"{}\": invalid colors argument (must be auto, always or never)",
+                args.color
+            ),
+        };
+        Ok(Self {
+            path: args.path,
+            color,
+            recursive: args.recursive,
+            all: args.all,
+            invert: args.invert,
+            types: args.types,
+            user_permissions,
+            group_permissions,
+            public_permissions,
+            owner: args.owner,
+            group: args.group,
+        })
+    }
+}
+
 /// Represents a file system item.
 struct Item {
     entry: DirEntry,
+    metadata: Metadata,
     extra_metadata: ItemMetadata,
 }
 
@@ -72,12 +165,17 @@ impl Item {
         let extra_metadata = ItemMetadata::new(&entry, &metadata);
         Self {
             entry,
+            metadata,
             extra_metadata,
         }
     }
 }
 
 /// Represents the metadata of a file system item.
+///
+/// Dead field type_char is allowed because it could be useful to implement --long output similar
+/// to ls down the road.
+#[allow(dead_code)]
 struct ItemMetadata {
     permission_string: String,
     type_char: char,
@@ -88,20 +186,15 @@ struct ItemMetadata {
 impl ItemMetadata {
     fn new(entry: &DirEntry, metadata: &Metadata) -> Self {
         Self {
-            permission_string: Self::get_permission_string(&entry, &metadata),
-            type_char: Self::get_type_char(&entry),
-            owner: Self::get_owner(&metadata),
-            group: Self::get_group(&metadata),
+            permission_string: Self::get_permission_string(entry, metadata),
+            type_char: Self::get_type_char(entry),
+            owner: Self::get_owner(metadata),
+            group: Self::get_group(metadata),
         }
     }
 
     /// Takes a reference to an entry and returns the permissions of the entry as a string of
     /// letters and hyphens.
-    ///
-    /// # Panics
-    ///
-    /// Panics if one of the number of the numeric permissions of the entry is greater than 7, which
-    /// should never happen.
     fn get_permission_string(entry: &DirEntry, metadata: &Metadata) -> String {
         let mut permissions_code = format!("{:o}", metadata.permissions().mode());
 
@@ -130,16 +223,12 @@ impl ItemMetadata {
                 '2' => "-w-",
                 '1' => "--x",
                 '0' => "---",
-                _ => panic!("invalid permission"),
+                _ => unreachable!(),
             })
             .collect::<String>()
     }
 
     /// Gets the type character used when printing the entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entry type is not recognized, which should never happen.
     fn get_type_char(entry: &DirEntry) -> char {
         if entry.file_type().is_file() {
             '.'
@@ -194,78 +283,76 @@ impl ItemMetadata {
     }
 }
 
-/// # Errors
-///
-/// Returns an error if the `--group` argument was passed on macos.
-/// Returns an error if the given path is invalid.
-/// Returns an error if failed to construct a regex from arguments provided with `-u`, '-g' or
-/// '-p'.
-/// Some called functions can also returns errors.
-///
-///  # Panics
-///
-///  Some called function can panic.
 fn main() -> Result<()> {
     let args = Args::parse();
-
-    #[cfg(target_os = "macos")]
-    {
-        if args.group.is_some() {
-            bail!("The --group argument is not supported on macos")
-        }
-    }
-    ensure!(
-        Path::new(&args.path).exists(),
-        "\"{}\": No such file or directory (os error 2)",
-        args.path
-    );
-    let user_permissions = match args.user_permissions {
-        Some(s) => match Regex::new(&s) {
-            Ok(re) => Some(re),
-            Err(e) => bail!("\"{s}\": invalid user permissions: {e}"),
-        },
-        None => None,
-    };
-    let group_permissions = match args.group_permissions {
-        Some(s) => match Regex::new(&s) {
-            Ok(re) => Some(re),
-            Err(e) => bail!("\"{s}\" invalid group permissions: {e}"),
-        },
-        None => None,
-    };
-    let public_permissions = match args.public_permissions {
-        Some(s) => match Regex::new(&s) {
-            Ok(re) => Some(re),
-            Err(e) => bail!("\"{s}\": invalid public permissions: {e}"),
-        },
-        None => None,
-    };
-
-    let colors = match args.colors.as_str() {
-        "always" => true,
-        "never" => false,
-        "auto" => {
-            // Colors only if stdout is a tty.
-            if atty::is(Stream::Stdout) {
-                true
-            } else {
-                false
-            }
-        }
-        _ => bail!(
-            "\"{}\": invalid colors argument (must be auto, always or never)",
-            args.colors
-        ),
-    };
+    let config = Config::try_from(args)?;
 
     let lscolors = LsColors::from_env().unwrap_or_default();
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    let walker = construct_walker(args.recursive, &args.path);
 
-    for entry in walker
+    if !config.recursive {
+        display_directory(&config.path, &config, &mut lock, &lscolors)?;
+    } else {
+        for entry in WalkDir::new(&config.path)
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|entry| config.all || !is_hidden(entry))
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue, // We just ignore the entry if we don't have the right permissions.
+            };
+            let metadata = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue, // Same as above, we ignore the entry if we don't have the right
+                                    // permissions.
+            };
+            if !metadata.is_dir() {
+                continue; // We skip anything that isn't a directory.
+            }
+
+            let item = Item::new(entry, metadata);
+
+            writeln!(lock, "\n{}:", item.entry.path().display())?; // Prints the path of the directory
+                                                                   // that we are walkding.
+
+            display_directory(
+                &item.entry.path().to_path_buf(),
+                &config,
+                &mut lock,
+                &lscolors,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Non-recursively walks a directory, puts its contents into a grid and display said grid.
+///
+/// # Errors
+///
+/// Returns an error if failed to write the grid to stdout.
+fn display_directory<T>(
+    path: &T,
+    config: &Config,
+    lock: &mut StdoutLock,
+    lscolors: &LsColors,
+) -> Result<()>
+where
+    T: AsRef<Path>,
+{
+    let mut grid = Grid::new(GridOptions {
+        filling: Filling::Spaces(2),
+        direction: Direction::LeftToRight,
+    });
+
+    for entry in WalkDir::new(path)
+        .min_depth(1)
+        .max_depth(1)
         .into_iter()
-        .filter_entry(|entry| args.all || !is_hidden(entry))
+        .filter_entry(|entry| config.all || !is_hidden(entry))
     {
         let entry = match entry {
             Ok(entry) => entry,
@@ -276,36 +363,43 @@ fn main() -> Result<()> {
             Err(_) => continue, // Same as above, we ignore the entry if we don't have the right
                                 // permissions.
         };
-
         let item = Item::new(entry, metadata);
 
-        if args.recursive && item.entry.file_type().is_dir() {
-            writeln!(lock, "\n{}:", item.entry.path().display())?; // Prints the directory we are currently walking.
-        }
+        let matching = type_matching(&item, &config.types.as_deref())?
+            && owner_matching(&item, &config.owner.as_deref())
+            && group_matching(&item, &config.group.as_deref())
+            && user_permissions_matching(&item, &config.user_permissions.as_ref())?
+            && group_permissions_matching(&item, &config.group_permissions.as_ref())?
+            && public_permissions_matching(&item, &config.public_permissions.as_ref())?;
 
-        let matching = type_matching(&item, &args.etype.as_deref())?
-            && owner_matching(&item, &args.owner.as_deref())
-            && group_matching(&item, &args.group.as_deref())
-            && user_permissions_matching(&item, &user_permissions.as_ref())?
-            && group_permissions_matching(&item, &group_permissions.as_ref())?
-            && public_permissions_matching(&item, &public_permissions.as_ref())?;
+        if (!config.invert && matching) || (config.invert && !matching) {
+            let entry_name = item.entry.file_name().to_str().unwrap();
 
-        if (!args.invert && matching) || (args.invert && !matching) {
-            print_entry(&mut lock, &item, colors, &lscolors)?;
+            if !config.color {
+                grid.add(Cell::from(entry_name))
+            } else {
+                let colored_name = match lscolors
+                    .style_for_path_with_metadata(item.entry.path(), Some(&item.metadata))
+                {
+                    Some(s) => s.to_nu_ansi_term_style().paint(entry_name).to_string(),
+                    None => entry_name.to_string(),
+                };
+                grid.add(Cell {
+                    contents: colored_name,
+                    width: entry_name.len(), // We need to manually give the width or else the color
+                                             // codes will be counted as part of the width and mess
+                                             // up the display.
+                })
+            }
         }
     }
-
+    write!(
+        lock,
+        "{}",
+        grid.fit_into_width(*TERM_WIDTH)
+            .unwrap_or_else(|| grid.fit_into_columns(1))
+    )?;
     Ok(())
-}
-
-/// Returns a recursive walker with no max depth if `--recursive` is set, else returns a walker
-/// with a max depth of 1.
-fn construct_walker(recursive: bool, path: &str) -> WalkDir {
-    let walker = WalkDir::new(path).min_depth(1);
-    if recursive {
-        return walker;
-    }
-    walker.max_depth(1)
 }
 
 /// Returns true if the entry name starts with a dot.
@@ -322,13 +416,13 @@ fn is_hidden(entry: &DirEntry) -> bool {
 /// # Errors
 ///
 /// Returns an error if one of the given types is invalid.
-fn type_matching(item: &Item, etype: &Option<&[char]>) -> Result<bool> {
-    if etype.is_none() {
+fn type_matching(item: &Item, types: &Option<&[char]>) -> Result<bool> {
+    if types.is_none() {
         return Ok(true);
     }
 
     let mut matching = false;
-    for c in etype.unwrap().iter() {
+    for c in types.unwrap().iter() {
         matching = match c {
             '.' | '-' => {
                 if item.entry.file_type().is_file() {
@@ -438,49 +532,4 @@ fn public_permissions_matching(item: &Item, public_permissions: &Option<&Regex>)
         return Ok(true);
     }
     Ok(false)
-}
-
-/// Prints the entry file name, with different colors depending on its path if colors is true.
-///
-/// We could have an options to use ls default output, with only file names and nothing else, but
-/// since we are dealing with permissions and ownership I don't think it is pertinent.
-///
-/// # Errors
-///
-/// Returns an error when failing to write to stdout.
-fn print_entry(
-    lock: &mut StdoutLock,
-    item: &Item,
-    colors: bool,
-    lscolors: &LsColors,
-) -> Result<()> {
-    let ename = item.entry.file_name().to_str().unwrap();
-    let displayed_string = format!(
-        "{}{} {} {} {}",
-        item.extra_metadata.type_char,
-        item.extra_metadata.permission_string,
-        item.extra_metadata.owner,
-        item.extra_metadata.group,
-        ename
-    );
-
-    let style = lscolors.style_for_path(item.entry.path());
-    let ansi_style = style.map(Style::to_ansi_term_style).unwrap_or_default();
-
-    if !colors {
-        writeln!(lock, "{}", displayed_string)?;
-    } else if item.entry.file_type().is_symlink() {
-        let link = read_link(item.entry.path()).unwrap();
-        let pointing_to = link.to_str().unwrap();
-        writeln!(
-            lock,
-            "{} -> {}",
-            ansi_style.paint(displayed_string),
-            ansi_style.paint(pointing_to)
-        )?;
-    } else {
-        writeln!(lock, "{}", ansi_style.paint(displayed_string))?;
-    }
-
-    Ok(())
 }
