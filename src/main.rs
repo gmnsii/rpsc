@@ -5,9 +5,10 @@ use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::fs::Metadata;
+use std::fs::{read_link, Metadata};
 use std::io::StdoutLock;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::PathBuf;
 use std::{io::Write, path::Path};
 use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
 use terminal_size::{terminal_size, Height, Width};
@@ -374,7 +375,8 @@ where
             && public_permissions_matching(&item, &config.public_permissions.as_ref())?;
 
         if (!config.invert && matching) || (config.invert && !matching) {
-            let entry_name = item.entry.file_name().to_str().unwrap();
+            let entry_name = item.entry.file_name().to_str().unwrap().to_string();
+            let mut pointing_to: Option<String> = None;
 
             if config.long {
                 grid.add(Cell::from(format!(
@@ -383,6 +385,11 @@ where
                 )));
                 grid.add(Cell::from(item.extra_metadata.owner));
                 grid.add(Cell::from(item.extra_metadata.group));
+
+                if item.entry.file_type().is_symlink() {
+                    let link = read_link(item.entry.path()).unwrap();
+                    pointing_to = Some(link.to_str().unwrap().to_owned())
+                }
             }
 
             if !config.color {
@@ -391,15 +398,34 @@ where
                 let colored_name = match lscolors
                     .style_for_path_with_metadata(item.entry.path(), Some(&item.metadata))
                 {
-                    Some(s) => s.to_nu_ansi_term_style().paint(entry_name).to_string(),
+                    Some(s) => s.to_nu_ansi_term_style().paint(&entry_name).to_string(),
                     None => entry_name.to_string(),
                 };
-                grid.add(Cell {
-                    contents: colored_name,
-                    width: entry_name.len(), // We need to manually give the width or else the color
-                                             // codes will be counted as part of the width and mess
-                                             // up the display.
-                })
+
+                if pointing_to.is_some() {
+                    let pointing_to = pointing_to.unwrap().to_string();
+                    let pointing_to_metadata = match PathBuf::from(&pointing_to).metadata() {
+                        Ok(meta) => Some(meta),
+                        Err(_) => None,
+                    };
+                    let colored_link = match lscolors
+                        .style_for_path_with_metadata(&pointing_to, pointing_to_metadata.as_ref())
+                    {
+                        Some(s) => s.to_nu_ansi_term_style().paint(&pointing_to).to_string(),
+                        None => pointing_to.to_string(),
+                    };
+                    grid.add(Cell {
+                        contents: format!("{} -> {}", colored_name, colored_link),
+                        width: entry_name.len() + 4 + pointing_to.len(),
+                    })
+                } else {
+                    grid.add(Cell {
+                        contents: colored_name,
+                        width: entry_name.len(), // We need to manually give the width or else the color
+                                                 // codes will be counted as part of the width and mess
+                                                 // up the display.
+                    })
+                }
             }
         }
     }
