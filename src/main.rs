@@ -227,8 +227,12 @@ impl ExtraMetadata {
     }
 
     fn has_extended_attributes(entry: &DirEntry) -> bool {
-        let mut xattr = xattr::list(entry.path()).unwrap().peekable();
-        xattr.peek().is_some()
+        let xattr = xattr::list(entry.path());
+        if xattr.is_err() {
+            return false;
+        } else {
+            return xattr.unwrap().peekable().peek().is_some();
+        }
     }
 }
 
