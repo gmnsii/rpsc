@@ -261,9 +261,9 @@ impl ExtraMetadata {
         let date_time: DateTime<Local> = DateTime::from(time);
         let modified_year = date_time.format("%Y").to_string();
         if modified_year == YEAR.to_string() {
-            return date_time.format("%b %d %H:%M").to_string();
+            return date_time.format("%b %e %H:%M").to_string();
         } else {
-            date_time.format("%b %d %Y").to_string()
+            date_time.format("%b %e %Y").to_string()
         }
     }
 }
