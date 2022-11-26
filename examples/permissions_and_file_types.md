@@ -21,9 +21,9 @@ drwxr-xr-x ...  target
 drwxr-xr-x ...  examples
 drwxr-xr-x ...  src
 ```
-You can also specify the --type argument multiple times to return files of multiple types ('.' and '-' can both be used for normal files):  
+You can also specify the --type argument multiple times to return files of multiple types:  
 ```shell
-$ rpsc --type d --type .
+$ rpsc --type d --type -
 .rw-r--r-- ...  Cargo.toml
 .rw-r--r-- ...  LICENSE-APACHE
 drwxr-xr-x ...  target

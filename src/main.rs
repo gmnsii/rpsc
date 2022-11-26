@@ -426,7 +426,7 @@ fn type_matching(item: &Item, types: &Option<&[char]>) -> Result<bool> {
     let mut matching = false;
     for c in types.unwrap().iter() {
         matching = match c {
-            '.' | '-' => {
+            '-' => {
                 if item.entry.file_type().is_file() {
                     true
                 } else {
