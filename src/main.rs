@@ -177,10 +177,6 @@ impl Item {
 }
 
 /// Represents the metadata of a file system item.
-///
-/// Dead field type_char is allowed because it could be useful to implement --long output similar
-/// to ls down the road.
-#[allow(dead_code)]
 struct ItemMetadata {
     permission_string: String,
     type_char: char,
