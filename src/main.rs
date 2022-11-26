@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
     fs::{read_link, Metadata},
-    io::{StdoutLock, Write},
+    io::{self, Write},
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -58,11 +58,11 @@ struct Args {
     #[arg(short = 'p')]
     public_permissions: Option<Regex>,
 
-    /// Specify the user that must own the file.
+    /// Specify the user that must own the files.
     #[arg(long = "owner")]
     owner: Option<String>,
 
-    /// Specify the group that must own the file. Not supported on macos.
+    /// Specify the group that must own the files. Not supported on macos.
     #[arg(long = "group", value_parser = |group: &str| {
         #[cfg(target_os = "macos")]
         {
@@ -72,7 +72,15 @@ struct Args {
     })]
     group: Option<String>,
 
-    /// Specify the number of hardlinks the file must have.
+    /// Specify that the files must have extended attributes. [Conflicts with --no-xattr]
+    #[arg(long = "xattr", conflicts_with = "no_xattr")]
+    xattr: bool,
+
+    /// Specify that the files must not have extended attributes. [Conflicts with --xattr]
+    #[arg(long = "no-xattr", conflicts_with = "xattr")]
+    no_xattr: bool,
+
+    /// Specify the number of hardlinks the files must have.
     #[arg(long = "hardlinks")]
     hardlinks: Option<u64>,
 
@@ -118,16 +126,13 @@ struct Config {
     owner: Option<String>,
     group: Option<String>,
     hardlinks: Option<u64>,
+    xattr: Option<bool>,
 }
 
 impl TryFrom<Args> for Config {
     type Error = anyhow::Error;
 
     /// Constructs a configuration from command line arguments.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if faling to construct a regex from the -u, -g and -p arguments.
     fn try_from(args: Args) -> Result<Self, Self::Error> {
         let color = match args.color {
             Color::Always => true,
@@ -135,6 +140,13 @@ impl TryFrom<Args> for Config {
             Color::Auto => {
                 atty::is(Stream::Stdout) // Colors only if stdout is a tty.
             }
+        };
+        let xattr = if args.xattr {
+            Some(true)
+        } else if args.no_xattr {
+            Some(false)
+        } else {
+            None
         };
         Ok(Self {
             path: args.path,
@@ -150,6 +162,7 @@ impl TryFrom<Args> for Config {
             owner: args.owner,
             group: args.group,
             hardlinks: args.hardlinks,
+            xattr,
         })
     }
 }
@@ -239,13 +252,11 @@ impl ExtraMetadata {
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::try_from(args)?;
-
+    let mut stdout = io::stdout().lock();
     let lscolors = LsColors::from_env().unwrap_or_default();
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
 
     if !config.recursive {
-        display_directory(&config.path, &config, &mut lock, &lscolors)?;
+        display_directory(&config.path, &config, &mut stdout, &lscolors)?;
     } else {
         for entry in WalkDir::new(&config.path)
             .min_depth(1)
@@ -268,13 +279,13 @@ fn main() -> Result<()> {
 
             let item = Item::new(entry, metadata);
 
-            writeln!(lock, "\n{}:", item.entry.path().display())?; // Prints the path of the directory
-                                                                   // that we are walkding.
+            writeln!(stdout, "\n{}:", item.entry.path().display())?; // Prints the path of the directory
+                                                                     // that we are walkding.
 
             display_directory(
                 &item.entry.path().to_path_buf(),
                 &config,
-                &mut lock,
+                &mut stdout,
                 &lscolors,
             )?;
         }
@@ -288,14 +299,15 @@ fn main() -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if failed to write the grid to stdout.
-fn display_directory<T>(
+fn display_directory<T, W>(
     path: &T,
     config: &Config,
-    lock: &mut StdoutLock,
+    lock: &mut W,
     lscolors: &LsColors,
 ) -> Result<()>
 where
     T: AsRef<Path>,
+    W: io::Write,
 {
     let mut grid = Grid::new(GridOptions {
         filling: Filling::Spaces(2),
@@ -326,7 +338,8 @@ where
             && user_permissions_matching(&item, &config.user_permissions.as_ref())?
             && group_permissions_matching(&item, &config.group_permissions.as_ref())?
             && public_permissions_matching(&item, &config.public_permissions.as_ref())?
-            && hardlinks_matching(&item, &config.hardlinks);
+            && hardlinks_matching(&item, &config.hardlinks)
+            && xattr_matching(&item, &config.xattr);
 
         if (!config.invert && matching) || (config.invert && !matching) {
             let entry_name = item.entry.file_name().to_str().unwrap().to_string();
@@ -523,6 +536,13 @@ fn public_permissions_matching(item: &Item, public_permissions: &Option<&Regex>)
 
 fn hardlinks_matching(item: &Item, hardlinks: &Option<u64>) -> bool {
     if hardlinks.is_none() || hardlinks.unwrap() == item.metadata.nlink() {
+        return true;
+    }
+    false
+}
+
+fn xattr_matching(item: &Item, xattr: &Option<bool>) -> bool {
+    if xattr.is_none() || xattr.unwrap() == item.extra_metadata.has_xattr {
         return true;
     }
     false
