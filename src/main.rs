@@ -26,12 +26,16 @@ struct Args {
     types: Option<Vec<char>>,
 
     /// Recurse into directories.
-    #[arg(short = 'R')]
+    #[arg(short = 'R', long = "recurse")]
     recursive: bool,
 
     /// Show hidden and 'dot' files.
-    #[arg(short = 'a')]
+    #[arg(short = 'a', long = "all")]
     all: bool,
+
+    /// Display extended details and attributes.
+    #[arg(short = 'l', long = "long")]
+    long: bool,
 
     /// Returns the results that doesn't match instead of the results that does.
     #[arg(long = "invert")]
@@ -72,6 +76,7 @@ struct Config {
     color: bool,
     recursive: bool,
     all: bool,
+    long: bool,
     invert: bool,
     types: Option<Vec<char>>,
     user_permissions: Option<Regex>,
@@ -129,8 +134,7 @@ impl TryFrom<Args> for Config {
             "always" => true,
             "never" => false,
             "auto" => {
-                // Colors only if stdout is a tty.
-                atty::is(Stream::Stdout)
+                atty::is(Stream::Stdout) // Colors only if stdout is a tty.
             }
             _ => bail!(
                 "\"{}\": invalid colors argument (must be auto, always or never)",
@@ -142,6 +146,7 @@ impl TryFrom<Args> for Config {
             color,
             recursive: args.recursive,
             all: args.all,
+            long: args.long,
             invert: args.invert,
             types: args.types,
             user_permissions,
@@ -375,8 +380,17 @@ where
         if (!config.invert && matching) || (config.invert && !matching) {
             let entry_name = item.entry.file_name().to_str().unwrap();
 
+            if config.long {
+                grid.add(Cell::from(format!(
+                    "{}{}",
+                    item.extra_metadata.type_char, item.extra_metadata.permission_string
+                )));
+                grid.add(Cell::from(item.extra_metadata.owner));
+                grid.add(Cell::from(item.extra_metadata.group));
+            }
+
             if !config.color {
-                grid.add(Cell::from(entry_name))
+                grid.add(Cell::from(entry_name));
             } else {
                 let colored_name = match lscolors
                     .style_for_path_with_metadata(item.entry.path(), Some(&item.metadata))
@@ -393,12 +407,16 @@ where
             }
         }
     }
-    write!(
-        lock,
-        "{}",
-        grid.fit_into_width(*TERM_WIDTH)
-            .unwrap_or_else(|| grid.fit_into_columns(1))
-    )?;
+    if !config.long {
+        write!(
+            lock,
+            "{}",
+            grid.fit_into_width(*TERM_WIDTH)
+                .unwrap_or_else(|| grid.fit_into_columns(1))
+        )?;
+    } else {
+        write!(lock, "{}", grid.fit_into_columns(4))?;
+    }
     Ok(())
 }
 
