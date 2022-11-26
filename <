@@ -358,8 +358,8 @@ where
                     None => entry_name.to_string(),
                 };
 
-                if let Some(link) = pointing_to {
-                    let pointing_to = link.to_string();
+                if pointing_to.is_some() {
+                    let pointing_to = pointing_to.unwrap().to_string();
                     let pointing_to_metadata = match PathBuf::from(&pointing_to).metadata() {
                         Ok(meta) => Some(meta),
                         Err(_) => None,
