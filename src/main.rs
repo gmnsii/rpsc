@@ -1,5 +1,6 @@
 use anyhow::Result;
 use atty::Stream;
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clap::{Parser, ValueEnum};
 use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
@@ -10,6 +11,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
 };
 use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
 use terminal_size::{terminal_size, Height, Width};
@@ -18,6 +20,10 @@ use walkdir::{DirEntry, WalkDir};
 
 static TERM_WIDTH: Lazy<usize> =
     Lazy::new(|| terminal_size().unwrap_or((Width(80), Height(0))).0 .0 as usize);
+static YEAR: Lazy<String> = Lazy::new(|| {
+    let date = chrono::offset::Local::now();
+    date.format("%Y").to_string()
+});
 
 #[derive(Parser, Debug)]
 #[command(version, max_term_width = *TERM_WIDTH)]
@@ -191,6 +197,7 @@ struct ExtraMetadata {
     owner: String,
     group: String,
     has_xattr: bool,
+    data_modified: String,
 }
 
 impl ExtraMetadata {
@@ -203,6 +210,7 @@ impl ExtraMetadata {
             owner: Self::get_owner(metadata),
             group: Self::get_group(metadata),
             has_xattr: Self::has_extended_attributes(entry),
+            data_modified: Self::get_date_modified(metadata),
         }
     }
 
@@ -245,6 +253,17 @@ impl ExtraMetadata {
             return false;
         } else {
             return xattr.unwrap().peekable().peek().is_some();
+        }
+    }
+
+    fn get_date_modified(metadata: &Metadata) -> String {
+        let time = UNIX_EPOCH + Duration::from_secs(metadata.mtime() as u64);
+        let date_time: DateTime<Local> = DateTime::from(time);
+        let modified_year = date_time.format("%Y").to_string();
+        if modified_year == YEAR.to_string() {
+            return date_time.format("%b %d %H:%M").to_string();
+        } else {
+            date_time.format("%b %d %Y").to_string()
         }
     }
 }
@@ -358,6 +377,7 @@ where
                 grid.add(Cell::from(item.metadata.nlink().to_string()));
                 grid.add(Cell::from(item.extra_metadata.owner));
                 grid.add(Cell::from(item.extra_metadata.group));
+                grid.add(Cell::from(item.extra_metadata.data_modified));
 
                 if item.entry.file_type().is_symlink() {
                     let link = read_link(item.entry.path()).unwrap();
@@ -410,7 +430,7 @@ where
                 .unwrap_or_else(|| grid.fit_into_columns(1))
         )?;
     } else {
-        write!(lock, "{}", grid.fit_into_columns(5))?;
+        write!(lock, "{}", grid.fit_into_columns(6))?;
     }
     Ok(())
 }

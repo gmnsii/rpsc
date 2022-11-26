@@ -12,6 +12,7 @@ homepage = "https://github.com/gmnsii/rpsc"
 [dependencies]
 anyhow = "1.0.66"
 atty = "0.2.14"
+chrono = "0.4.23"
 clap = { version = "4.0.26", features = ["derive", "wrap_help"] }
 lscolors = { version = "0.13.0", default-features = false,features = ["nu-ansi-term"]}
 nix = { version = "0.25.0", features = ["user"] }
