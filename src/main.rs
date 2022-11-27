@@ -1,6 +1,6 @@
 use anyhow::Result;
 use atty::Stream;
-use chrono::{DateTime, Local, NaiveDateTime, Utc};
+use chrono::{DateTime, Local};
 use clap::{Parser, ValueEnum};
 use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
@@ -48,6 +48,10 @@ struct Args {
     #[arg(long = "invert")]
     invert: bool,
 
+    /// Ignore files matching the specified pattern.
+    #[arg(long = "ignore")]
+    ignore: Option<Regex>,
+
     /// Whether or not rpsc should use colored output.
     #[arg(long = "color", default_value = "auto", value_enum)]
     color: Color,
@@ -90,6 +94,18 @@ struct Args {
     #[arg(long = "hardlinks")]
     hardlinks: Option<u64>,
 
+    /// Specify which timestamp field to list
+    #[arg(long = "time", value_enum, default_value = "modified")]
+    time: Time,
+
+    /// Specify the style used to display time (e.g. %H-%M)
+    #[arg(long = "time-style")]
+    time_style: Option<String>,
+
+    /// Displays files whose time match the given regex.
+    #[arg(long = "match-time")]
+    match_time: Option<Regex>,
+
     /// The path of the directory that rpsc should search into.
     #[arg(default_value = ".", value_parser = |path: &str| {
         match PathBuf::from(path).exists() {
@@ -125,6 +141,7 @@ struct Config {
     all: bool,
     long: bool,
     invert: bool,
+    ignore: Option<Regex>,
     types: Option<Vec<Type>>,
     user_permissions: Option<Regex>,
     group_permissions: Option<Regex>,
@@ -133,6 +150,17 @@ struct Config {
     group: Option<String>,
     hardlinks: Option<u64>,
     xattr: Option<bool>,
+    time: Time,
+    time_style: Option<String>,
+    match_time: Option<Regex>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Time {
+    Modified,
+    Created,
+    Accessed,
+    Changed,
 }
 
 impl TryFrom<Args> for Config {
@@ -161,6 +189,7 @@ impl TryFrom<Args> for Config {
             all: args.all,
             long: args.long,
             invert: args.invert,
+            ignore: args.ignore,
             types: args.types,
             user_permissions: args.user_permissions,
             group_permissions: args.group_permissions,
@@ -169,6 +198,9 @@ impl TryFrom<Args> for Config {
             group: args.group,
             hardlinks: args.hardlinks,
             xattr,
+            time: args.time,
+            time_style: args.time_style,
+            match_time: args.match_time,
         })
     }
 }
@@ -181,8 +213,8 @@ struct Item {
 }
 
 impl Item {
-    fn new(entry: DirEntry, metadata: Metadata) -> Self {
-        let extra_metadata = ExtraMetadata::new(&entry, &metadata);
+    fn new(entry: DirEntry, metadata: Metadata, config: &Config) -> Self {
+        let extra_metadata = ExtraMetadata::new(&entry, &metadata, config);
         Self {
             entry,
             metadata,
@@ -197,11 +229,11 @@ struct ExtraMetadata {
     owner: String,
     group: String,
     has_xattr: bool,
-    data_modified: String,
+    time: String,
 }
 
 impl ExtraMetadata {
-    fn new(entry: &DirEntry, metadata: &Metadata) -> Self {
+    fn new(entry: &DirEntry, metadata: &Metadata, config: &Config) -> Self {
         Self {
             permission_string: display_permissions_unix(
                 metadata.permissions().mode().try_into().unwrap(),
@@ -210,7 +242,7 @@ impl ExtraMetadata {
             owner: Self::get_owner(metadata),
             group: Self::get_group(metadata),
             has_xattr: Self::has_extended_attributes(entry),
-            data_modified: Self::get_date_modified(metadata),
+            time: Self::get_time(metadata, &config.time, &config.time_style.as_deref()),
         }
     }
 
@@ -249,18 +281,26 @@ impl ExtraMetadata {
 
     fn has_extended_attributes(entry: &DirEntry) -> bool {
         let xattr = xattr::list(entry.path());
-        if xattr.is_err() {
-            return false;
+        if let Ok(x) = xattr {
+            x.peekable().peek().is_some()
         } else {
-            return xattr.unwrap().peekable().peek().is_some();
+            false // If we don't have permissions to read the file extended attributes then we
+                  // ignore the error and treat the file as having no extended attributes.
         }
     }
 
-    fn get_date_modified(metadata: &Metadata) -> String {
-        let time = UNIX_EPOCH + Duration::from_secs(metadata.mtime() as u64);
-        let date_time: DateTime<Local> = DateTime::from(time);
+    fn get_time(metadata: &Metadata, time: &Time, time_style: &Option<&str>) -> String {
+        let timest = match time {
+            Time::Modified => UNIX_EPOCH + Duration::from_secs(metadata.mtime() as u64),
+            Time::Changed => UNIX_EPOCH + Duration::from_secs(metadata.ctime() as u64),
+            Time::Accessed => UNIX_EPOCH + Duration::from_secs(metadata.atime() as u64),
+            Time::Created => metadata.created().unwrap(),
+        };
+        let date_time: DateTime<Local> = DateTime::from(timest);
         let modified_year = date_time.format("%Y").to_string();
-        if modified_year == YEAR.to_string() {
+        if let Some(s) = time_style {
+            return date_time.format(s).to_string();
+        } else if modified_year == YEAR.to_string() {
             return date_time.format("%b %e %H:%M").to_string();
         } else {
             date_time.format("%b %e %Y").to_string()
@@ -296,7 +336,7 @@ fn main() -> Result<()> {
                 continue; // We skip anything that isn't a directory.
             }
 
-            let item = Item::new(entry, metadata);
+            let item = Item::new(entry, metadata, &config);
 
             writeln!(stdout, "\n{}:", item.entry.path().display())?; // Prints the path of the directory
                                                                      // that we are walkding.
@@ -349,7 +389,7 @@ where
             Err(_) => continue, // Same as above, we ignore the entry if we don't have the right
                                 // permissions.
         };
-        let item = Item::new(entry, metadata);
+        let item = Item::new(entry, metadata, config);
 
         let matching = type_matching(&item, &config.types.as_deref())?
             && owner_matching(&item, &config.owner.as_deref())
@@ -358,7 +398,9 @@ where
             && group_permissions_matching(&item, &config.group_permissions.as_ref())?
             && public_permissions_matching(&item, &config.public_permissions.as_ref())?
             && hardlinks_matching(&item, &config.hardlinks)
-            && xattr_matching(&item, &config.xattr);
+            && xattr_matching(&item, &config.xattr)
+            && name_not_ignored(&item, &config.ignore.as_ref())
+            && time_matching(&item, &config.match_time.as_ref());
 
         if (!config.invert && matching) || (config.invert && !matching) {
             let entry_name = item.entry.file_name().to_str().unwrap().to_string();
@@ -377,7 +419,7 @@ where
                 grid.add(Cell::from(item.metadata.nlink().to_string()));
                 grid.add(Cell::from(item.extra_metadata.owner));
                 grid.add(Cell::from(item.extra_metadata.group));
-                grid.add(Cell::from(item.extra_metadata.data_modified));
+                grid.add(Cell::from(item.extra_metadata.time));
 
                 if item.entry.file_type().is_symlink() {
                     let link = read_link(item.entry.path()).unwrap();
@@ -442,6 +484,17 @@ fn is_hidden(entry: &DirEntry) -> bool {
         .to_str()
         .map(|s| s.starts_with('.'))
         .unwrap_or(false)
+}
+
+fn name_not_ignored(item: &Item, ignore_pattern: &Option<&Regex>) -> bool {
+    if ignore_pattern.is_none()
+        || !ignore_pattern
+            .unwrap()
+            .is_match(item.entry.file_name().to_str().unwrap())
+    {
+        return true;
+    }
+    false
 }
 
 /// Determines if the typeof the given entry is matching with one of the given types.
@@ -563,6 +616,13 @@ fn hardlinks_matching(item: &Item, hardlinks: &Option<u64>) -> bool {
 
 fn xattr_matching(item: &Item, xattr: &Option<bool>) -> bool {
     if xattr.is_none() || xattr.unwrap() == item.extra_metadata.has_xattr {
+        return true;
+    }
+    false
+}
+
+fn time_matching(item: &Item, time: &Option<&Regex>) -> bool {
+    if time.is_none() || time.unwrap().is_match(&item.extra_metadata.time) {
         return true;
     }
     false
