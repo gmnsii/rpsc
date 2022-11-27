@@ -1,6 +1,6 @@
 [package]
 name = "rpsc"
-description = "rpsc is a *nix command line tool to quickly search for file system items matching given permission criterions."
+description = "rpsc is a *nix command line tool to quickly search for file systems items matching varied criterions like permissions, extended attributes and much more."
 authors = ["gmnsii gmnsii@protonmail.com"]
 version = "0.1.0"
 edition = "2021"
