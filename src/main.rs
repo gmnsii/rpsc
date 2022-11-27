@@ -4,6 +4,7 @@ use chrono::{DateTime, Local};
 use clap::{Parser, ValueEnum};
 use lscolors::LsColors;
 use nix::unistd::{Gid, Group, Uid, User};
+use number_prefix::NumberPrefix;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
@@ -48,8 +49,12 @@ struct Args {
     #[arg(long = "invert")]
     invert: bool,
 
+    /// List files size using only bytes, without any prefixes.
+    #[arg(short = 'B', long = "bytes")]
+    bytes: bool,
+
     /// Ignore files matching the specified pattern.
-    #[arg(long = "ignore")]
+    #[arg(short = 'I', long = "ignore")]
     ignore: Option<Regex>,
 
     /// Whether or not rpsc should use colored output.
@@ -102,9 +107,17 @@ struct Args {
     #[arg(long = "time-style")]
     time_style: Option<String>,
 
-    /// Displays files whose time match the given regex.
+    /// Displays files whose time matches the given regex.
     #[arg(long = "match-time")]
     match_time: Option<Regex>,
+
+    /// Displays file whose size matches the given regex.
+    #[arg(long = "match-size")]
+    match_size: Option<Regex>,
+
+    /// Set max recursion depth.
+    #[arg(short = 'L', long = "max-depth")]
+    max_depth: Option<usize>,
 
     /// The path of the directory that rpsc should search into.
     #[arg(default_value = ".", value_parser = |path: &str| {
@@ -140,6 +153,7 @@ struct Config {
     recursive: bool,
     all: bool,
     long: bool,
+    bytes: bool,
     invert: bool,
     ignore: Option<Regex>,
     types: Option<Vec<Type>>,
@@ -153,6 +167,8 @@ struct Config {
     time: Time,
     time_style: Option<String>,
     match_time: Option<Regex>,
+    match_size: Option<Regex>,
+    max_depth: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -189,6 +205,7 @@ impl TryFrom<Args> for Config {
             all: args.all,
             long: args.long,
             invert: args.invert,
+            bytes: args.bytes,
             ignore: args.ignore,
             types: args.types,
             user_permissions: args.user_permissions,
@@ -201,6 +218,8 @@ impl TryFrom<Args> for Config {
             time: args.time,
             time_style: args.time_style,
             match_time: args.match_time,
+            match_size: args.match_size,
+            max_depth: args.max_depth,
         })
     }
 }
@@ -230,6 +249,7 @@ struct ExtraMetadata {
     group: String,
     has_xattr: bool,
     time: String,
+    size: String,
 }
 
 impl ExtraMetadata {
@@ -243,6 +263,7 @@ impl ExtraMetadata {
             group: Self::get_group(metadata),
             has_xattr: Self::has_extended_attributes(entry),
             time: Self::get_time(metadata, &config.time, &config.time_style.as_deref()),
+            size: Self::get_size(metadata, config.bytes),
         }
     }
 
@@ -306,6 +327,32 @@ impl ExtraMetadata {
             date_time.format("%b %e %Y").to_string()
         }
     }
+
+    fn get_size(metadata: &Metadata, bytes_only: bool) -> String {
+        let bytes = metadata.size();
+        if bytes_only {
+            return bytes.to_string();
+        } else {
+            match NumberPrefix::binary(bytes as f64) {
+                NumberPrefix::Standalone(bytes) => format!("{bytes}"), // No specifier if it's
+                // just bytes.
+                NumberPrefix::Prefixed(prefix, n) => {
+                    let mut prefix = prefix.symbol().to_string();
+                    if prefix.ends_with('i') {
+                        prefix = prefix.trim_end_matches('i').to_lowercase();
+                    }
+
+                    // Check whether we get more than 10 if we round up to the first decimal
+                    // because we want do display 9.81 as "9.9", not as "10".
+                    if (10.0 * n).ceil() >= 100.0 {
+                        format!("{:.0}{}", n.ceil(), prefix)
+                    } else {
+                        format!("{:.1}{}", (10.0 * n).ceil() / 10.0, prefix)
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -317,9 +364,12 @@ fn main() -> Result<()> {
     if !config.recursive {
         display_directory(&config.path, &config, &mut stdout, &lscolors)?;
     } else {
-        for entry in WalkDir::new(&config.path)
-            .min_depth(1)
-            .sort_by_file_name()
+        let mut walker = WalkDir::new(&config.path).min_depth(1).sort_by_file_name();
+        if let Some(u) = config.max_depth {
+            walker = walker.max_depth(u);
+        }
+
+        for entry in walker
             .into_iter()
             .filter_entry(|entry| config.all || !is_hidden(entry))
         {
@@ -400,7 +450,8 @@ where
             && hardlinks_matching(&item, &config.hardlinks)
             && xattr_matching(&item, &config.xattr)
             && name_not_ignored(&item, &config.ignore.as_ref())
-            && time_matching(&item, &config.match_time.as_ref());
+            && time_matching(&item, &config.match_time.as_ref())
+            && size_matching(&item, &config.match_size.as_ref());
 
         if (!config.invert && matching) || (config.invert && !matching) {
             let entry_name = item.entry.file_name().to_str().unwrap().to_string();
@@ -419,6 +470,7 @@ where
                 grid.add(Cell::from(item.metadata.nlink().to_string()));
                 grid.add(Cell::from(item.extra_metadata.owner));
                 grid.add(Cell::from(item.extra_metadata.group));
+                grid.add(Cell::from(item.extra_metadata.size));
                 grid.add(Cell::from(item.extra_metadata.time));
 
                 if item.entry.file_type().is_symlink() {
@@ -472,7 +524,7 @@ where
                 .unwrap_or_else(|| grid.fit_into_columns(1))
         )?;
     } else {
-        write!(lock, "{}", grid.fit_into_columns(6))?;
+        write!(lock, "{}", grid.fit_into_columns(7))?;
     }
     Ok(())
 }
@@ -626,4 +678,11 @@ fn time_matching(item: &Item, time: &Option<&Regex>) -> bool {
         return true;
     }
     false
+}
+
+fn size_matching(item: &Item, size: &Option<&Regex>) -> bool {
+    if size.is_none() || size.unwrap().is_match(&item.extra_metadata.size) {
+        return true;
+    }
+    return false;
 }
