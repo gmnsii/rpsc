@@ -53,6 +53,10 @@ struct Args {
     #[arg(short = 'B', long = "bytes")]
     bytes: bool,
 
+    /// Displays files inode number
+    #[arg(short = 'i', long = "inode")]
+    inode: bool,
+
     /// Ignore files matching the specified pattern.
     #[arg(short = 'I', long = "ignore")]
     ignore: Option<Regex>,
@@ -77,14 +81,8 @@ struct Args {
     #[arg(long = "owner")]
     owner: Option<String>,
 
-    /// Specify the group that must own the files. Not supported on macos.
-    #[arg(long = "group", value_parser = |group: &str| {
-        #[cfg(target_os = "macos")]
-        {
-            return Err("This argument is not supported on macos");
-        }
-        Ok::<std::string::String, &str>(group.to_string())
-    })]
+    /// Specify the group that must own the files.
+    #[arg(long = "group")]
     group: Option<String>,
 
     /// Specify that the files must have extended attributes. [Conflicts with --no-xattr]
@@ -128,6 +126,7 @@ struct Args {
     path: String,
 }
 
+/// All possible values for the --color argument.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum Color {
     Always,
@@ -135,6 +134,7 @@ enum Color {
     Never,
 }
 
+/// All possible file types.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum Type {
     File,
@@ -146,6 +146,15 @@ enum Type {
     Block,
 }
 
+/// All displayable dates for files.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Time {
+    Modified,
+    Created,
+    Accessed,
+    Changed,
+}
+
 /// Represents the configuration of rpsc built using the command line arguments passed by the user.
 struct Config {
     path: String,
@@ -154,6 +163,7 @@ struct Config {
     all: bool,
     long: bool,
     bytes: bool,
+    inode: bool,
     invert: bool,
     ignore: Option<Regex>,
     types: Option<Vec<Type>>,
@@ -171,19 +181,9 @@ struct Config {
     max_depth: Option<usize>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-enum Time {
-    Modified,
-    Created,
-    Accessed,
-    Changed,
-}
-
-impl TryFrom<Args> for Config {
-    type Error = anyhow::Error;
-
+impl From<Args> for Config {
     /// Constructs a configuration from command line arguments.
-    fn try_from(args: Args) -> Result<Self, Self::Error> {
+    fn from(args: Args) -> Self {
         let color = match args.color {
             Color::Always => true,
             Color::Never => false,
@@ -198,7 +198,7 @@ impl TryFrom<Args> for Config {
         } else {
             None
         };
-        Ok(Self {
+        Self {
             path: args.path,
             color,
             recursive: args.recursive,
@@ -206,6 +206,7 @@ impl TryFrom<Args> for Config {
             long: args.long,
             invert: args.invert,
             bytes: args.bytes,
+            inode: args.inode,
             ignore: args.ignore,
             types: args.types,
             user_permissions: args.user_permissions,
@@ -220,7 +221,7 @@ impl TryFrom<Args> for Config {
             match_time: args.match_time,
             match_size: args.match_size,
             max_depth: args.max_depth,
-        })
+        }
     }
 }
 
@@ -250,6 +251,7 @@ struct ExtraMetadata {
     has_xattr: bool,
     time: String,
     size: String,
+    inode: u64,
 }
 
 impl ExtraMetadata {
@@ -261,9 +263,10 @@ impl ExtraMetadata {
             ),
             owner: Self::get_owner(metadata),
             group: Self::get_group(metadata),
-            has_xattr: Self::has_extended_attributes(entry),
+            has_xattr: Self::has_xattr(entry),
             time: Self::get_time(metadata, &config.time, &config.time_style.as_deref()),
             size: Self::get_size(metadata, config.bytes),
+            inode: Self::get_inode(metadata),
         }
     }
 
@@ -285,22 +288,16 @@ impl ExtraMetadata {
     /// # Panics
     ///
     /// Panics if failing to get the associated group, which should never happen as we check
-    /// beforehand that we have the right permissions.
-    #[allow(unreachable_code)]
-    #[allow(unused_variables)]
+    /// beforehand that we have the right p
     fn get_group(metadata: &Metadata) -> String {
-        #[cfg(target_os = "macos")]
-        {
-            return String::new();
-        }
-
         Group::from_gid(Gid::from(metadata.gid()))
             .unwrap()
             .unwrap()
             .name
     }
 
-    fn has_extended_attributes(entry: &DirEntry) -> bool {
+    /// Whether or not the file possesses extended attributes.
+    fn has_xattr(entry: &DirEntry) -> bool {
         let xattr = xattr::list(entry.path());
         if let Ok(x) = xattr {
             x.peekable().peek().is_some()
@@ -310,6 +307,8 @@ impl ExtraMetadata {
         }
     }
 
+    /// Gets the time associated with the file (default is modified but can also be changed,
+    /// accessed and created) and returns a date ready to be displayed.
     fn get_time(metadata: &Metadata, time: &Time, time_style: &Option<&str>) -> String {
         let timest = match time {
             Time::Modified => UNIX_EPOCH + Duration::from_secs(metadata.mtime() as u64),
@@ -328,6 +327,7 @@ impl ExtraMetadata {
         }
     }
 
+    /// Gets the size of the file and returns a string ready to be displayed.
     fn get_size(metadata: &Metadata, bytes_only: bool) -> String {
         let bytes = metadata.size();
         if bytes_only {
@@ -352,6 +352,10 @@ impl ExtraMetadata {
                 }
             }
         }
+    }
+
+    fn get_inode(metadata: &Metadata) -> u64 {
+        metadata.ino()
     }
 }
 
@@ -458,6 +462,9 @@ where
             let mut pointing_to: Option<String> = None;
 
             if config.long {
+                if config.inode {
+                    grid.add(Cell::from(item.extra_metadata.inode.to_string()))
+                }
                 grid.add(Cell::from(format!(
                     "{}{}",
                     item.extra_metadata.permission_string,
@@ -524,12 +531,15 @@ where
                 .unwrap_or_else(|| grid.fit_into_columns(1))
         )?;
     } else {
-        write!(lock, "{}", grid.fit_into_columns(7))?;
+        if !config.inode {
+            write!(lock, "{}", grid.fit_into_columns(7))?;
+        } else {
+            write!(lock, "{}", grid.fit_into_columns(8))?;
+        }
     }
     Ok(())
 }
 
-/// Returns true if the entry name starts with a dot.
 fn is_hidden(entry: &DirEntry) -> bool {
     entry
         .file_name()
@@ -549,7 +559,6 @@ fn name_not_ignored(item: &Item, ignore_pattern: &Option<&Regex>) -> bool {
     false
 }
 
-/// Determines if the typeof the given entry is matching with one of the given types.
 fn type_matching(item: &Item, types: &Option<&[Type]>) -> Result<bool> {
     if types.is_none() {
         return Ok(true);

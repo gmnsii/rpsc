@@ -12,12 +12,12 @@ rpsc is a \*nix command line tool to quickly search for file systems items match
 ```shell
 $ rpsc /dev --type character -u rw- --owner root --time modified --time-style="%Y %d %m %H" -l --match-time="2022 25 11 20"
 
-crw-rw-rw-  1  root    2022 25 11 20  aes_0
-crw-------  1  root    2022 25 11 20  afsc_type5
-crw-------  1  root    2022 25 11 20  auditpipe
-crw-r--r--  1  root    2022 25 11 20  auditsessions
-crw-------  1  root    2022 25 11 20  autofs
-crw-------  1  root    2022 25 11 20  autofs_control
+crw-rw-rw-  1  root  wheel     0  2022 25 11 20  aes_0
+crw-------  1  root  wheel     0  2022 25 11 20  afsc_type5
+crw-------  1  root  wheel     0  2022 25 11 20  auditpipe
+crw-r--r--  1  root  wheel     0  2022 25 11 20  auditsessions
+crw-------  1  root  wheel     0  2022 25 11 20  autofs
+crw-------  1  root  wheel     0  2022 25 11 20  autofs_control
 ......
 ```
 Here I searched for all the character devices in my dev folder whose user permissions matched the 'rw-' regex that are owned by the root user and that were last modified the 25 november of this year between 20 and 21 hour.
