@@ -2,30 +2,27 @@
 
 # rpsc
 
-rpsc is a \*nix command line tool to quickly search for file systems items matching given permissions criterions.
+rpsc is a \*nix command line tool to quickly search for file systems items matching varied criterions like permissions, extended attributes and much more.
 
 **Contents:** [Examples](#examples) — [Usage](#usage) — [Installation](#installation) — [Styling](#styling) — [License](#license)
 
 </div>
 
-## Examples
+## Example
+```shell
+$ rpsc /dev --type character -u rw- --owner root --time modified --time-style="%Y %d %m %H" -l --match-time="2022 25 11 20"
 
-```shell   
-$ exa -l
-.rw-r--r--   12k dev 23 Nov 16:02 Cargo.lock
-.rw-r--r--   360 dev 23 Nov 18:45 Cargo.toml
-.rw-r--r--   11k dev 23 Nov 18:43 LICENSE-APACHE
-.rw-r--r--  1.1k dev 23 Nov 18:43 LICENSE-MIT
-.rw-r--r--   854 dev 24 Nov 09:14 README.md
-drwxr-xr-x     - dev 22 Nov 15:17 src
-drwxr-xr-x@    - dev 23 Nov 14:37 target
-
-$ rpsc -p r-x
-target  src
+crw-rw-rw-  1  root    2022 25 11 20  aes_0
+crw-------  1  root    2022 25 11 20  afsc_type5
+crw-------  1  root    2022 25 11 20  auditpipe
+crw-r--r--  1  root    2022 25 11 20  auditsessions
+crw-------  1  root    2022 25 11 20  autofs
+crw-------  1  root    2022 25 11 20  autofs_control
+......
 ```
-Here the -p r-x argument mean we want files whose public permissions match the `r-x` regex.
-rpsc is not limited to permissions and you can also search files based on their type and on their associated owner and group.
-More examples are available in the examples folder in the root of this repository.
+Here I searched for all the character devices in my dev folder whose user permissions matched the 'rw-' regex that are owned by the root user and that were last modified the 25 november of this year between 20 and 21 hour.
+Of course this is a very specific example but it was to showcase a few of rpsc's options.
+
 
 ## Usage 
 
