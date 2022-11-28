@@ -12,6 +12,7 @@ use atty::Stream;
 use chrono::{DateTime, Local};
 use clap::{Parser, ValueEnum};
 use lscolors::LsColors;
+use nix::unistd::{Gid, Group, Uid, User};
 use number_prefix::NumberPrefix;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -24,13 +25,14 @@ use std::{
 };
 use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
 use terminal_size::{terminal_size, Height, Width};
-use users::{get_group_by_gid, get_user_by_uid};
 use uucore::fs::display_permissions_unix;
 use walkdir::{DirEntry, WalkDir};
 
+/// The width of the display (80 if the output isn't a tty).
 static DISPLAY_WIDTH: Lazy<usize> =
     Lazy::new(|| terminal_size().unwrap_or((Width(80), Height(0))).0 .0 as usize);
-static CURRENT_YEAR: Lazy<String> = Lazy::new(|| {
+/// The current year.
+static YEAR: Lazy<String> = Lazy::new(|| {
     let date = chrono::offset::Local::now();
     date.format("%Y").to_string()
 });
@@ -267,44 +269,47 @@ impl<'a> Item<'a> {
 
     /// Gets the name of the owner of the file.
     fn owner(&self) -> String {
-        get_user_by_uid(self.metadata.uid())
+        User::from_uid(Uid::from(self.metadata.uid()))
             .unwrap()
-            .name()
-            .to_string_lossy()
-            .to_string()
+            .unwrap()
+            .name
     }
 
     /// Gets the name of the group associated with the entry. Returns an empty string on macos.
     fn group(&self) -> String {
-        get_group_by_gid(self.metadata.gid())
-            // On macos, files can have no associated groups, in which case we return an empty string.
-            .map_or(String::new(), |g| g.name().to_string_lossy().to_string())
+        Group::from_gid(Gid::from(self.metadata.gid()))
+            .unwrap()
+            .map_or(String::new(), |g| g.name) // On macos, files can have no associated groups,
+                                               // in which case we display an empty string.
     }
 
     /// Whether or not the file possesses extended attributes.
     fn has_xattr(&self) -> bool {
-        // If we don't have permissions to read the file extended attributes then we ignore the
-        // error and treat the file as having none.
-        xattr::list(self.entry.path()).map_or(false, |x| x.peekable().peek().is_some())
+        let xattrs = xattr::list(self.entry.path());
+        xattrs.map_or(false, |x| x.peekable().peek().is_some()) // If we don't have permissions to
+                                                                // read the file extended attributes
+                                                                // then we ignore the error and
+                                                                // treat the file as having no
+                                                                // extended attributes.
     }
 
     /// Gets the time associated with the file (default is modified but can also be changed,
     /// accessed and created) and returns a date ready to be displayed.
     fn time(&self) -> String {
-        let timestamp = match self.time {
+        let timest = match self.time {
             Time::Modified => UNIX_EPOCH + Duration::from_secs(self.metadata.mtime() as u64),
             Time::Changed => UNIX_EPOCH + Duration::from_secs(self.metadata.ctime() as u64),
             Time::Accessed => UNIX_EPOCH + Duration::from_secs(self.metadata.atime() as u64),
             Time::Created => self.metadata.created().unwrap(),
         };
-        let date: DateTime<Local> = DateTime::from(timestamp);
-        let year = date.format("%Y").to_string();
+        let date_time: DateTime<Local> = DateTime::from(timest);
+        let modified_year = date_time.format("%Y").to_string();
         if let Some(s) = self.time_style {
-            return date.format(s).to_string();
-        } else if year == CURRENT_YEAR.to_string() {
-            return date.format("%b %e %H:%M").to_string();
+            return date_time.format(s).to_string();
+        } else if modified_year == YEAR.to_string() {
+            return date_time.format("%b %e %H:%M").to_string();
         }
-        date.format("%b %e %Y").to_string()
+        date_time.format("%b %e %Y").to_string()
     }
 
     /// Gets the size of the file and returns a string ready to be displayed.
@@ -314,13 +319,12 @@ impl<'a> Item<'a> {
             bytes.to_string()
         } else {
             match NumberPrefix::binary(bytes as f64) {
-                NumberPrefix::Standalone(bytes) => format!("{bytes}"), // No unit specifier if it's
+                NumberPrefix::Standalone(bytes) => format!("{bytes}"), // No specifier if it's
                 // just bytes.
                 NumberPrefix::Prefixed(prefix, n) => {
                     let mut prefix = prefix.symbol().to_string();
                     if prefix.ends_with('i') {
-                        prefix = prefix.trim_end_matches('i').to_lowercase(); // Instead of Ki, Mi,
-                                                                              // etc, we use k, m.
+                        prefix = prefix.trim_end_matches('i').to_lowercase();
                     }
 
                     // Check whether we get more than 10 if we round up to the first decimal
@@ -452,8 +456,8 @@ where
                     if item.has_xattr() { "@" } else { "" }
                 )));
                 grid.add(Cell::from(item.metadata.nlink().to_string()));
-                grid.add(Cell::from(item.owner().to_string()));
-                grid.add(Cell::from(item.group().to_string()));
+                grid.add(Cell::from(item.owner()));
+                grid.add(Cell::from(item.group()));
                 grid.add(Cell::from(item.size()));
                 grid.add(Cell::from(item.time()));
 
