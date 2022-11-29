@@ -8,9 +8,12 @@
 #![warn(rust_2018_idioms)]
 
 use anyhow::Result;
-use atty::Stream;
 use chrono::{DateTime, Local};
 use clap::{Parser, ValueEnum};
+use libc::{
+    ioctl, mode_t, winsize, STDOUT_FILENO, S_IRGRP, S_IROTH, S_IRUSR, S_ISGID, S_ISUID, S_ISVTX,
+    S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR, TIOCGWINSZ,
+};
 use lscolors::LsColors;
 use number_prefix::NumberPrefix;
 use once_cell::sync::Lazy;
@@ -18,22 +21,44 @@ use regex::Regex;
 use std::{
     fs::{read_link, Metadata},
     io::{self, stdout, BufWriter, Write},
+    mem::zeroed,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    ptr::addr_of_mut,
     time::{Duration, UNIX_EPOCH},
 };
 use term_grid::{Cell, Direction, Filling, Grid, GridOptions};
-use terminal_size::{terminal_size, Height, Width};
 use users::{get_group_by_gid, get_user_by_uid};
-use uucore::fs::display_permissions_unix;
 use walkdir::{DirEntry, WalkDir};
 
-static DISPLAY_WIDTH: Lazy<usize> =
-    Lazy::new(|| terminal_size().unwrap_or((Width(80), Height(0))).0 .0 as usize);
+static DISPLAY_WIDTH: Lazy<usize> = Lazy::new(|| term_width().unwrap_or(80) as usize);
 static CURRENT_YEAR: Lazy<String> = Lazy::new(|| {
     let date = chrono::offset::Local::now();
     date.format("%Y").to_string()
 });
+
+fn term_width() -> io::Result<u16> {
+    unsafe {
+        let mut size: winsize = zeroed();
+        cvt(ioctl(STDOUT_FILENO, TIOCGWINSZ, addr_of_mut!(size)))?;
+        Ok(size.ws_xpixel)
+    }
+}
+
+/// Convert an error code into an actual error.
+fn cvt(t: i32) -> io::Result<i32> {
+    if t == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(t)
+    }
+}
+
+macro_rules! has {
+    ($mode:expr, $perm:expr) => {
+        $mode & $perm != 0
+    };
+}
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug)]
@@ -162,7 +187,9 @@ impl Args {
             Color::Always => true,
             Color::Never => false,
             Color::Auto => {
-                atty::is(Stream::Stdout) // Colors only if stdout is a tty.
+                unsafe {
+                    libc::isatty(libc::STDOUT_FILENO) != 0 // Colors only if stdout is a tty.
+                }
             }
         };
         self.attributes = if self.xattr {
@@ -245,8 +272,54 @@ impl<'a> Item<'a> {
     }
 
     /// Gets the permissions of the file displayed as a string of 9 characters.
+    #[allow(clippy::if_not_else)]
     fn permission_string(&self) -> String {
-        display_permissions_unix(self.metadata.permissions().mode() as u16, false)
+        let mut result = String::with_capacity(9);
+        let mode = self.metadata.permissions().mode() as u16;
+
+        result.push(if has!(mode, S_IRUSR) { 'r' } else { '-' });
+        result.push(if has!(mode, S_IWUSR) { 'w' } else { '-' });
+        result.push(if has!(mode, S_ISUID as mode_t) {
+            if has!(mode, S_IXUSR) {
+                's'
+            } else {
+                'S'
+            }
+        } else if has!(mode, S_IXUSR) {
+            'x'
+        } else {
+            '-'
+        });
+
+        result.push(if has!(mode, S_IRGRP) { 'r' } else { '-' });
+        result.push(if has!(mode, S_IWGRP) { 'w' } else { '-' });
+        result.push(if has!(mode, S_ISGID as mode_t) {
+            if has!(mode, S_IXGRP) {
+                's'
+            } else {
+                'S'
+            }
+        } else if has!(mode, S_IXGRP) {
+            'x'
+        } else {
+            '-'
+        });
+
+        result.push(if has!(mode, S_IROTH) { 'r' } else { '-' });
+        result.push(if has!(mode, S_IWOTH) { 'w' } else { '-' });
+        result.push(if has!(mode, S_ISVTX as mode_t) {
+            if has!(mode, S_IXOTH) {
+                't'
+            } else {
+                'T'
+            }
+        } else if has!(mode, S_IXOTH) {
+            'x'
+        } else {
+            '-'
+        });
+
+        result
     }
 
     /// Gets the permissions of the file displayed as an octal sequence of numbers.
