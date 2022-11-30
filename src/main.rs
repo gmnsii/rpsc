@@ -275,7 +275,7 @@ impl<'a> Item<'a> {
     #[allow(clippy::if_not_else)]
     fn permission_string(&self) -> String {
         let mut result = String::with_capacity(9);
-        let mode = self.metadata.permissions().mode() as u16;
+        let mode = self.metadata.permissions().mode() as mode_t;
 
         result.push(if has!(mode, S_IRUSR) { 'r' } else { '-' });
         result.push(if has!(mode, S_IWUSR) { 'w' } else { '-' });
